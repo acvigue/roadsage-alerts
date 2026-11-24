@@ -1,0 +1,32 @@
+{
+  "name": "roadsage-alerts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Live road-alert stream for the RoadSage app: a Hono server that holds a Waze realtime session and serves alerts over a WebSocket.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --packages=external --outfile=dist/index.js",
+    "start": "node dist/index.js",
+    "type-check": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.6",
+    "@hono/node-ws": "^1.2.0",
+    "hono": "^4.11.1",
+    "ioredis": "^5.9.2",
+    "undici": "^7.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "esbuild": "^0.27.0",
+    "prettier": "^3.8.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "packageManager": "pnpm@10.5.2",
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

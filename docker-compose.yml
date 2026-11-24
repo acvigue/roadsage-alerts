@@ -1,0 +1,37 @@
+name: roadsage-alerts
+
+services:
+  api:
+    image: ghcr.io/acvigue/roadsage-alerts:main
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "8080"
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "${PORT:-8080}:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - services
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Alerts are short-lived and rebuilt by scanning, so no persistence is needed.
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    # Not published to the host: only reachable on the service network.
+    networks:
+      - services
+
+networks:
+  services:
+    name: roadsage-alerts
+    driver: bridge
