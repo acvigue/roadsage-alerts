@@ -9,8 +9,12 @@ services:
     environment:
       PORT: "8080"
       REDIS_URL: redis://redis:6379
+      DATA_DIR: /data
     ports:
       - "${PORT:-8080}:8080"
+    volumes:
+      # The device registry: which Waze account belongs to which device. Keep it.
+      - data:/data
     depends_on:
       redis:
         condition: service_healthy
@@ -30,6 +34,9 @@ services:
     # Not published to the host: only reachable on the service network.
     networks:
       - services
+
+volumes:
+  data:
 
 networks:
   services:

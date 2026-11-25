@@ -1,15 +1,24 @@
 #!/usr/bin/env node
-// Connect to /v1/stream like the app does, ask for one box, print what arrives.
-//   node scripts/stream-test.mjs [lat lon halfDeg] [--base https://host] [--key API_KEY]
+// Do what the app does: register a device id, open /v1/stream, ask for one box, print what arrives.
+//   node scripts/stream-test.mjs [lat lon halfDeg] [--base https://host] [--key API_KEY] [--device ID]
+// The device id defaults to a fixed one: every new id makes the server create
+// another Waze account, so do not randomise it.
 const args = process.argv.slice(2)
 const opt = name => { const i = args.indexOf(name); return i >= 0 ? args.splice(i, 2)[1] : undefined }
 const base = opt('--base') ?? 'http://localhost:8080'
 const key = opt('--key')
+const device = opt('--device') ?? 'stream-test-device'
 const [lat, lon, half] = [Number(args[0] ?? 41.8781), Number(args[1] ?? -87.6298), Number(args[2] ?? 0.08)]
-const url = base.replace(/^http/, 'ws') + `/v1/stream?device=stream-test-${Date.now()}`
-const ws = new WebSocket(url, key ? { headers: { Authorization: `Bearer ${key}` } } : undefined)
+const headers = key ? { Authorization: `Bearer ${key}` } : {}
 const t0 = Date.now()
 const at = () => `${((Date.now() - t0) / 1000).toFixed(1).padStart(5)}s`
+
+const reg = await fetch(`${base}/v1/devices/${encodeURIComponent(device)}`, { method: 'PUT', headers })
+console.log(at(), 'register', reg.status, JSON.stringify(await reg.json().catch(() => null)))
+if (!reg.ok) process.exit(1)
+
+const url = base.replace(/^http/, 'ws') + `/v1/stream?device=${encodeURIComponent(device)}`
+const ws = new WebSocket(url, key ? { headers } : undefined)
 ws.onopen = () => {
   console.log(at(), 'open', url)
   ws.send(JSON.stringify({ type: 'view', south: lat - half, west: lon - half, north: lat + half, east: lon + half }))

@@ -45,8 +45,13 @@ COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/package.json ./package.json
 
+# The device registry (one Waze account per device) is kept here; mount a volume.
+RUN mkdir -p /data && chown node:node /data
+VOLUME /data
+
 ENV NODE_ENV=production
 ENV PORT=8080
+ENV DATA_DIR=/data
 USER node
 
 EXPOSE 8080

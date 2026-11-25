@@ -5,6 +5,7 @@ dist/
 *.tsbuildinfo
 
 # local configuration and credentials
+data/
 .env
 .env.*
 !.env.example

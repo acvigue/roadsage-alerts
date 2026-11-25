@@ -1,7 +1,10 @@
 /**
- * Waze realtime (rt) client: log an account in and ask for the alerts in a
- * view. Protocol notes:
+ * Waze realtime (rt) client: create an anonymous account, log an account in
+ * and ask for the alerts in a view. Protocol notes:
  *
+ *   0. POST /rtserver/distrib/command batch{ClientInfo, register{}}
+ *                                      -> RegisterSuccessful{username,password}
+ *      (what the app does on first launch, before anyone signs in)
  *   1. POST /rtserver/distrib/login   body: ProtoBase64,<Batch{ClientInfo}>   -> cookies
  *      (the Waze-Session-Affinity cookie pins later requests to one backend)
  *   2. POST /rtserver/distrib/command batch{ClientInfo, login_request{password_credential}}
@@ -91,13 +94,14 @@ const asNum = (f?: Field): number => Number(asBig(f))
 const asStr = (f?: Field): string => (f && f.v instanceof Uint8Array ? new TextDecoder().decode(f.v) : '')
 const sub = (m: Map<number, Field[]>, n: number) => decode(asBytes(m.get(n)?.[0]))
 
-// One installation id per process, like a freshly installed app.
-const INSTALLATION_ID = crypto.randomUUID().toUpperCase()
+/** An installation id, like a freshly installed app has. */
+export const newInstallationId = (): string => crypto.randomUUID().toUpperCase()
 // Where the "device" says it last was. Only used to pick the server region.
 const HOME = { lat: 39.8283, lon: -98.5795 }
+const COMMAND = '/rtserver/distrib/command?sessionid=-1&cookie='
 
 /** ClientInfo (element 2184) describing an iOS Waze client. */
-function clientInfoPayload(): number[] {
+function clientInfoPayload(installationId: string): number[] {
   const micro = (v: number) => Math.round(v * 1e6)
   return [
     ...pbInt(1, 234),
@@ -109,7 +113,7 @@ function clientInfoPayload(): number[] {
     ...pbStr(11, '27.3'),
     ...pbInt(15, 0),
     ...pbStr(16, 'en'),
-    ...pbStr(17, INSTALLATION_ID),
+    ...pbStr(17, installationId),
     ...pbInt(18, 21), ...pbInt(19, 1),
     ...pbBytes(22, pbBytes(1, [...pbStr(1, 'uid_enabled'), ...pbStr(2, 'true')])),
     ...pbStr(23, 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'),
@@ -214,9 +218,44 @@ export function tokenUserId(token: string, globalId: string): number | null {
 export const unescapeToken = (t: string, a: string, b: string): string =>
   t.replace(/9(.)/g, (m, c) => (c === '9' ? '9' : c === 'a' ? a : c === 'b' ? b : m))
 
+/**
+ * What a reply held, for error messages: the element numbers of a Batch, or
+ * the start of the body when it is not one (Waze's plain-text errors). A
+ * Batch's contents are never printed, since they can hold credentials.
+ */
+function describeReply(r: HttpReply): string {
+  const nums = (decode(r.body).get(1001) ?? []).flatMap(el => [...decode(asBytes(el)).keys()])
+  const what = nums.length ? `elements [${nums.join(',')}]` : `body ${printable(r.body.slice(0, 160))}`
+  return `http ${r.status}, via ${r.header('via')}, ${what}`
+}
+
+/** An anonymous account and the installation it was created for. */
+export interface Account { username: string; password: string; installationId: string }
+
+/**
+ * Create an anonymous account, the way the app does on first launch. Waze
+ * picks the username and password; they log in like any other account.
+ */
+export async function register(t: Transport, installationId = newInstallationId()): Promise<Account> {
+  const body = new Uint8Array(batch(
+    element(2184, clientInfoPayload(installationId)),
+    element(2219, pbStr(1, '')),                       // Register{ code: "" }
+  ))
+  const r = await post(t, COMMAND, 'ProtoBase64,' + bytesToB64(body), '')
+  for (const el of decode(r.body).get(1001) ?? []) {
+    const ok = decode(asBytes(el)).get(2220)?.[0]      // register_successful
+    if (!ok) continue
+    const m = decode(asBytes(ok))
+    const username = asStr(m.get(1)?.[0]), password = asStr(m.get(2)?.[0])
+    if (username && password) return { username, password, installationId }
+  }
+  throw new Error(`register failed: no account in the reply (${describeReply(r)})`)
+}
+
 /** Log in an account and return a usable rt session (uid header + affinity cookie). */
-export async function login(username: string, password: string, t: Transport): Promise<WazeSession> {
-  const ci = clientInfoPayload()
+export async function login(account: Account, t: Transport): Promise<WazeSession> {
+  const { username, password } = account
+  const ci = clientInfoPayload(account.installationId)
   // 1. /login bootstrap -> affinity cookie
   const loginBody = 'ProtoBase64,' + bytesToB64(new Uint8Array(batch(element(2184, ci)))) + '\nGetGeoServerConfig,,'
   const r1 = await post(t, '/rtserver/distrib/login', loginBody, '')
@@ -225,7 +264,7 @@ export async function login(username: string, password: string, t: Transport): P
   const pwCred = [...pbStr(1, username), ...pbStr(2, password)]
   const loginReq = [...pbBytes(1, pwCred), ...pbInt(3, 1)]  // LoginRequest
   const bodyBytes = new Uint8Array(batch(element(2184, ci), element(2744, loginReq)))
-  const r2 = await post(t, '/rtserver/distrib/command?sessionid=-1&cookie=', 'ProtoBase64,' + bytesToB64(bodyBytes), cookie)
+  const r2 = await post(t, COMMAND, 'ProtoBase64,' + bytesToB64(bodyBytes), cookie)
   cookie = mergeCookies(r2, cookie)
   const respBytes = r2.body
   // find element 2745 login_response -> field1 login_success -> field3 secret_key
@@ -300,7 +339,7 @@ function mapDisplayed(lat: number, lon: number, span: Span): string {
  */
 export async function poll(t: Transport, sess: WazeSession, lat: number, lon: number, span: Span = 0.03, waitMs = 0): Promise<Alert[]> {
   const body = `SetMood,321\nLocation,${lon.toFixed(6)},${lat.toFixed(6)}\n${mapDisplayed(lat, lon, span)}`
-  const r = await post(t, '/rtserver/distrib/command?sessionid=-1&cookie=', body, sess.cookie, sess.uidHeader, waitMs)
+  const r = await post(t, COMMAND, body, sess.cookie, sess.uidHeader, waitMs)
   if (r.status !== 200) throw new Error(`poll failed: http ${r.status}`)
   const txt = new TextDecoder().decode(r.body.slice(0, 160))
   if (/relogin|Unknown userid|UID expected|IllegalArgument/.test(txt)) {

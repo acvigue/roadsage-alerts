@@ -1,6 +1,6 @@
 /**
- * Upstream — one logged-in Waze session on one connection, shared by every
- * device that hashes to its account. Requests are strictly one at a time.
+ * Upstream — one logged-in Waze session on one connection, for one device's
+ * account. Requests are strictly one at a time.
  *
  * Two things shape how it is used:
  *   - Waze answers a view with at most ~20-30 alerts, and
@@ -8,9 +8,8 @@
  * So a view is covered by asking for tiles and splitting the full ones (see
  * scanner.ts), and everything received goes into the shared store.
  */
-import { login, poll, ALERT_TYPE, ALERT_SUBTYPE, type WazeSession } from './waze/client.js'
+import { login, poll, ALERT_TYPE, ALERT_SUBTYPE, type Account, type WazeSession } from './waze/client.js'
 import { makeTransport, type ClosableTransport } from './waze/transport.js'
-import type { Account } from './waze/accounts.js'
 import type { AlertStore, StoredAlert } from './store.js'
 import { tileKey, type Tile } from './geo.js'
 
@@ -29,7 +28,7 @@ export class Upstream {
 
   stats = { logins: 0, polls: 0, alerts: 0, lastLoginAt: 0, lastPollAt: 0 }
 
-  constructor(private account: Account, private proxyUrl: string, private store: AlertStore) {
+  constructor(private account: Account, proxyUrl: string, private store: AlertStore) {
     this.transport = makeTransport(proxyUrl)
   }
 
@@ -56,7 +55,7 @@ export class Upstream {
     if (wait > 0) throw new Error(`${this.lastError} (next login attempt in ${Math.ceil(wait / 1000)} s)`)
     try {
       const t0 = Date.now()
-      this.session = await login(this.account.username, this.account.password, this.transport)
+      this.session = await login(this.account, this.transport)
       this.failures = 0
       this.lastError = ''
       this.asked.clear() // a new session has been sent nothing yet
@@ -113,19 +112,62 @@ export class Upstream {
     })
   }
 
-  /** Can we reach Waze at all? No credentials involved. */
-  async probe(): Promise<{ status: number; bytes: number; ms: number }> {
-    const t = makeTransport(this.proxyUrl, 20_000)
-    try {
-      const t0 = Date.now()
-      const r = await t.post('/rtserver/distrib/login', 'GetGeoServerConfig,,', {
-        'User-Agent': 'Waze/0 CFNetwork/3896.300.31 Darwin/27.3.0',
-        'Content-Type': 'application/x-www-form-urlencoded', Accept: '*/*', 'x-waze-network-version': '3',
-      })
-      return { status: r.status, bytes: r.body.length, ms: Date.now() - t0 }
-    } finally {
-      await t.close()
-    }
+  /** Drop the session and its connection (after the queued requests finish). */
+  close(): Promise<void> {
+    return this.run(async () => {
+      this.session = null
+      await this.transport.close()
+    })
   }
+}
+
+/** Can we reach Waze at all? No credentials involved. */
+export async function probeWaze(proxyUrl: string): Promise<{ status: number; bytes: number; ms: number }> {
+  const t = makeTransport(proxyUrl, 20_000)
+  try {
+    const t0 = Date.now()
+    const r = await t.post('/rtserver/distrib/login', 'GetGeoServerConfig,,', {
+      'User-Agent': 'Waze/0 CFNetwork/3896.300.31 Darwin/27.3.0',
+      'Content-Type': 'application/x-www-form-urlencoded', Accept: '*/*', 'x-waze-network-version': '3',
+    })
+    return { status: r.status, bytes: r.body.length, ms: Date.now() - t0 }
+  } finally {
+    await t.close()
+  }
+}
+
+/**
+ * The upstream sessions in use, one per device (so per account). A session is
+ * opened when the device's first stream needs it and closed a minute after its
+ * last one goes, so a device that drops and reconnects keeps its session.
+ */
+export class Sessions {
+  private live = new Map<string, { up: Upstream; refs: number; timer?: NodeJS.Timeout }>()
+
+  constructor(private proxyUrl: string, private store: AlertStore, private idleMs = 60_000) {}
+
+  acquire(account: Account): Upstream {
+    let s = this.live.get(account.username)
+    if (!s) {
+      s = { up: new Upstream(account, this.proxyUrl, this.store), refs: 0 }
+      this.live.set(account.username, s)
+    }
+    clearTimeout(s.timer)
+    s.timer = undefined
+    s.refs++
+    return s.up
+  }
+
+  release(account: Account): void {
+    const s = this.live.get(account.username)
+    if (!s || --s.refs > 0) return
+    s.timer = setTimeout(() => {
+      this.live.delete(account.username)
+      void s.up.close().catch(() => {})
+    }, this.idleMs)
+    s.timer.unref()
+  }
+
+  get states() { return [...this.live.values()].map(s => ({ streams: s.refs, ...s.up.state })) }
 }
 

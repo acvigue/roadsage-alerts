@@ -7,8 +7,10 @@ export const config = {
   apiKey: process.env.API_KEY ?? '',
   /** redis://host:6379 — unset keeps alerts in memory (single process, lost on restart). */
   redisUrl: process.env.REDIS_URL ?? '',
-  /** JSON array: [{"username":"...","password":"..."}] */
-  wazeAccounts: process.env.WAZE_ACCOUNTS ?? '',
+  /** Directory for what must survive a restart: the device registry (devices.json). */
+  dataDir: process.env.DATA_DIR || './data',
+  /** Most devices (so, Waze accounts) the server will ever register. */
+  maxDevices: num(process.env.MAX_DEVICES, 50),
   /**
    * Optional HTTP proxy for the Waze connection: http://user:pass@host:port.
    * Waze refuses many datacenter addresses; from a home connection leave unset.
