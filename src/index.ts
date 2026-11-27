@@ -5,6 +5,7 @@
  *   GET /health/upstream     one credential-free request to Waze (is the route out working?)
  *   PUT /v1/devices/:id      register a device; its Waze account is created on first use
  *   GET /v1/stream?device=   WebSocket: alerts for the box the app sends (see scanner.ts)
+ *   GET /v1/limits/12/:x/:y  posted speed limits in one z12 tile, by OSM way id (see limits.ts)
  */
 import { serve } from '@hono/node-server'
 import { createNodeWebSocket } from '@hono/node-ws'
@@ -16,6 +17,7 @@ import { DeviceRegistry, RegistrationRefused, validDeviceId } from './devices.js
 import { MemoryStore, RedisStore, type AlertStore } from './store.js'
 import { Sessions, probeWaze } from './upstream.js'
 import { Watcher } from './scanner.js'
+import { LIMIT_ZOOM, SpeedLimits } from './limits.js'
 import type { Account } from './waze/client.js'
 
 const ttlMs = config.alertTtlMinutes * 60_000
@@ -30,6 +32,7 @@ if (process.env.WAZE_ACCOUNTS) {
 }
 
 const watchers = new Set<Watcher>()
+const limits = new SpeedLimits(config.redisUrl)
 
 const authenticate: MiddlewareHandler = async (c, next) => {
   if (!config.apiKey) return next()
@@ -65,6 +68,22 @@ app.get('/health/upstream', authenticate, async c => {
     return c.json({ ok: r.status === 200, proxied: !!config.wazeProxy, ...r }, r.status === 200 ? 200 : 502)
   } catch (err) {
     return c.json({ ok: false, proxied: !!config.wazeProxy, error: String(err) }, 502)
+  }
+})
+
+app.get('/v1/limits/:z/:x/:y', authenticate, async c => {
+  const [z, x, y] = ['z', 'x', 'y'].map(k => Number(c.req.param(k)))
+  const n = 2 ** LIMIT_ZOOM
+  if (z !== LIMIT_ZOOM || !Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x >= n || y >= n) {
+    return c.json({ error: `tiles are z${LIMIT_ZOOM} only` }, 400)
+  }
+  try {
+    const ways = await limits.tile(x, y)
+    c.header('Cache-Control', 'public, max-age=86400')
+    return c.json({ z, x, y, unit: 'mph', ways })
+  } catch (err) {
+    c.header('Retry-After', '300')
+    return c.json({ error: String(err instanceof Error ? err.message : err) }, 503)
   }
 })
 

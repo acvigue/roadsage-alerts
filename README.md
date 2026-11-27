@@ -52,6 +52,7 @@ is needed; elsewhere set `WAZE_PROXY` to a proxy with residential exits.
 - `GET /health/upstream` — one credential-free request to Waze, to check the route out
 - `PUT /v1/devices/<id>` — register a device
 - `GET /v1/stream?device=<id>[&channel=<name>]` — WebSocket
+- `GET /v1/limits/12/<x>/<y>` — posted speed limits in one z12 map tile, as `{ ways: { <OSM way id>: <mph> } }`. Read from OpenStreetMap (Overpass) on first request and kept in Redis for 30 days; a first request can take up to a minute
 
 ### Devices
 
